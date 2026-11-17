@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CheckStock</title>
+<style>
+:root{--bg:#fff;--fg:#1a1a1a;--mut:#6b6b6b;--line:#ddd;--acc:#2563eb;--bad:#b91c1c;--ok:#15803d;--card:#f6f6f7}
+@media(prefers-color-scheme:dark){:root{--bg:#161618;--fg:#eee;--mut:#9a9a9a;--line:#333;--acc:#6ea0ff;--bad:#f87171;--ok:#4ade80;--card:#202024}}
+*{box-sizing:border-box}
+body{font:14px system-ui,sans-serif;margin:0;background:var(--bg);color:var(--fg)}
+header{display:flex;gap:16px;align-items:center;padding:12px 20px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+h1{font-size:18px;margin:0}
+nav button{margin-right:4px}
+button,select,input{font:inherit;padding:6px 10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
+button{cursor:pointer}button.on,button.primary{background:var(--acc);color:#fff;border-color:var(--acc)}
+main{padding:16px 20px;max-width:1100px}
+section{display:none}section.on{display:block}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin-bottom:12px}
+.card h3{margin:0 0 8px;font-size:15px}
+table{border-collapse:collapse;width:100%}
+th,td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line)}
+th{color:var(--mut);font-weight:500}
+td.n,th.n{text-align:right}
+.transit{margin-top:8px;color:var(--mut)}.transit b{color:var(--fg)}
+.del{color:var(--mut);font-style:italic}
+form{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:6px 0}
+form input[type=number]{width:80px}
+#msg{position:fixed;right:16px;bottom:16px;max-width:420px}
+.toast{padding:10px 14px;border-radius:8px;margin-top:8px;color:#fff}
+.toast.ok{background:var(--ok)}.toast.err{background:var(--bad)}
+.alert{border:1px solid var(--bad);border-radius:8px;padding:10px 14px;margin:8px 0;display:none}
+.mut{color:var(--mut)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:12px}
+</style>
+</head>
+<body>
+<header>
+  <h1>CheckStock</h1>
+  <nav>
+    <button data-tab="stock" class="on">Остатки</button>
+    <button data-tab="wh">Склады</button>
+    <button data-tab="ops">Операции</button>
+    <button data-tab="hist">История</button>
+  </nav>
+  <span id="audit" class="mut"></span>
+</header>
+<main>
+<section id="stock" class="on"></section>
+
+<section id="wh">
+  <form id="f-wh"><input name="name" placeholder="Название нового ФФ" required><button class="primary">Добавить ФФ</button></form>
+  <div id="wh-list"></div>
+</section>
+
+<section id="ops">
+  <div class="grid">
+    <div class="card"><h3>Приход</h3>
+      <form data-url="/api/receipts"><select name="product_id" class="sel-p"></select><select name="warehouse_id" class="sel-wa"></select>
+        <input type="number" name="qty" min="1" placeholder="шт" required><button class="primary">Оприходовать</button></form></div>
+    <div class="card"><h3>Перемещение ФФ → ФФ</h3>
+      <form data-url="/api/transfers"><select name="product_id" class="sel-p"></select>
+        <select name="from_warehouse_id" class="sel-w"></select>→<select name="to_warehouse_id" class="sel-wa"></select>
+        <input type="number" name="qty" min="1" placeholder="шт" required><button class="primary">Отправить</button></form></div>
+    <div class="card"><h3>Резерв FBS</h3>
+      <form data-url="/api/fbs"><select name="product_id" class="sel-p"></select><select name="warehouse_id" class="sel-wa"></select>
+        <input type="number" name="qty" min="1" placeholder="шт" required><input name="ref" placeholder="№ заказа"><button class="primary">Зарезервировать</button></form></div>
+    <div class="card"><h3>Отправка FBO на маркетплейс</h3>
+      <form data-url="/api/fbo"><select name="product_id" class="sel-p"></select><select name="warehouse_id" class="sel-w"></select>
+        <input type="number" name="qty" min="1" placeholder="шт" required><input name="ref" placeholder="№ поставки"><button class="primary">Отправить</button></form></div>
+  </div>
+  <div id="alert" class="alert"></div>
+  <div class="grid">
+    <div class="card"><h3>Перемещения</h3><div id="tr-list"></div></div>
+    <div class="card"><h3>Заказы FBS / поставки FBO</h3><div id="ord-list"></div></div>
+  </div>
+</section>
+
+<section id="hist"><div class="card"><div id="mv-list"></div></div></section>
+</main>
+<div id="msg"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const OPS = {receipt:'Приход',transfer_send:'Отправка ФФ→ФФ',transfer_receive:'Приёмка ФФ',fbs_reserve:'Резерв FBS',
+  fbs_ship:'Отправка FBS',fbs_cancel:'Отмена резерва',fbo_ship:'Отправка FBO',fbo_receive:'Приёмка FBO'};
+const ST = {reserved:'в резерве',shipped:'у клиента (в пути)',cancelled:'отменён',in_transit:'в пути',received:'принято'};
+let S = {}; const keys = {};
+
+async function api(method, url, body, idem) {
+  const r = await fetch(url, {method, headers: {'Content-Type':'application/json', ...(idem ? {'Idempotency-Key': idem} : {})},
+    body: body ? JSON.stringify(body) : undefined});
+  const d = await r.json();
+  if (!r.ok) throw Object.assign(d, {http: r.status});
+  return d;
+}
+function toast(text, cls='ok') {
+  const el = document.createElement('div'); el.className = 'toast ' + cls; el.textContent = text;
+  $('#msg').append(el); setTimeout(() => el.remove(), 4000);
+}
+const errText = e => e.message || (e.detail ? JSON.stringify(e.detail) : String(e));
+
+async function load() {
+  const [stock, whs, tr, ord, mv, au] = await Promise.all(
+    ['stock','warehouses','transfers','orders','movements','audit'].map(x => api('GET', '/api/' + x)));
+  S = {stock: stock.products, whs, tr, ord, mv};
+  $('#audit').innerHTML = au.ok ? '<span style="color:var(--ok)">✔ остатки сходятся</span>' : '<span style="color:var(--bad)">✘ расхождение!</span>';
+  render();
+}
+
+function render() {
+  // остатки
+  $('#stock').innerHTML = S.stock.map(p => `
+    <div class="card"><h3>${esc(p.sku)} — ${esc(p.name)}</h3>
+    <table><tr><th>ФФ</th><th class="n">Физически</th><th class="n">Резерв FBS</th><th class="n">Доступно</th></tr>
+    ${p.warehouses.map(r => `<tr><td class="${r.deleted?'del':''}">${esc(r.name)}${r.deleted?' (удалён)':''}</td>
+      <td class="n">${r.on_hand}</td><td class="n">${r.reserved}</td><td class="n"><b>${r.available}</b></td></tr>`).join('')}
+    <tr><th>Итого</th><th class="n">${p.totals.on_hand}</th><th class="n">${p.totals.reserved}</th><th class="n">${p.totals.available}</th></tr></table>
+    <div class="transit">В пути: между ФФ <b>${p.in_transit.between_ff}</b> · на склад МП (FBO) <b>${p.in_transit.to_marketplace_fbo}</b>
+      · к клиенту (FBS) <b>${p.in_transit.to_client_fbs}</b> · принято на МП (FBO) <b>${p.at_marketplace}</b></div></div>`).join('');
+
+  // склады
+  $('#wh-list').innerHTML = S.whs.map(w => `
+    <div class="card"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      ${w.deleted ? `<b class="del">${esc(w.name)} (удалён)</b>` :
+        `<input value="${esc(w.name)}" id="rn-${w.id}"><button data-act="rename" data-id="${w.id}">Переименовать</button>
+         <button data-act="del" data-id="${w.id}">Удалить</button>`}</div>
+      <div class="mut" style="margin-top:6px">${w.items.length ? 'Здесь числится: ' + w.items.map(i =>
+        `${esc(i.sku)} ×${i.on_hand}${i.reserved ? ` (резерв ${i.reserved})` : ''}`).join(', ') : 'Товара нет'}</div></div>`).join('');
+
+  // селекты
+  const fill = (cls, opts) => document.querySelectorAll(cls).forEach(s => {
+    const v = s.value; s.innerHTML = opts.map(o => `<option value="${o[0]}">${esc(o[1])}</option>`).join(''); if (v) s.value = v; });
+  fill('.sel-p', S.stock.map(p => [p.id, `${p.sku} ${p.name}`]));
+  fill('.sel-wa', S.whs.filter(w => !w.deleted).map(w => [w.id, w.name]));
+  fill('.sel-w', S.whs.map(w => [w.id, w.name + (w.deleted ? ' (удалён)' : '')]));
+
+  // списки операций
+  $('#tr-list').innerHTML = S.tr.length ? `<table>${S.tr.map(t => `<tr><td>#${t.id} ${esc(t.sku)} ×${t.qty}</td>
+    <td>${esc(t.from)} → ${esc(t.to)}</td><td>${t.status === 'in_transit' ? `<button data-act="tr-recv" data-id="${t.id}">Принять</button>` : ST[t.status]}</td></tr>`).join('')}</table>` : '<span class="mut">Нет</span>';
+  $('#ord-list').innerHTML = S.ord.length ? `<table>${S.ord.map(o => `<tr><td>${o.kind} #${o.id} ${esc(o.sku)} ×${o.qty}</td><td>${esc(o.warehouse)}</td><td>${
+    o.kind === 'FBS' && o.status === 'reserved' ? `<button data-act="ship" data-id="${o.id}">Отправить</button> <button data-act="cancel" data-id="${o.id}">Отмена</button>`
+    : o.kind === 'FBO' && o.status === 'in_transit' ? `<button data-act="fbo-recv" data-id="${o.id}">Принять на МП</button>` : ST[o.status]}</td></tr>`).join('')}</table>` : '<span class="mut">Нет</span>';
+
+  // история
+  $('#mv-list').innerHTML = `<table><tr><th>Время</th><th>Операция</th><th>Товар</th><th class="n">Шт</th><th>Откуда</th><th>Куда</th><th>Док.</th></tr>${
+    S.mv.map(m => `<tr><td>${new Date(m.ts).toLocaleString('ru')}</td><td>${OPS[m.op] || m.op}</td><td>${esc(m.sku)}</td>
+    <td class="n">${m.qty}</td><td>${esc(m.from)}</td><td>${esc(m.to)}</td><td class="mut">${esc(m.ref)}</td></tr>`).join('')}</table>`;
+}
+
+// вкладки
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('nav button, section').forEach(x => x.classList.remove('on'));
+  b.classList.add('on'); $('#' + b.dataset.tab).classList.add('on');
+});
+
+// формы операций; Idempotency-Key живёт, пока не пришёл ответ сервера (повтор при обрыве сети не задвоит)
+document.querySelectorAll('form[data-url]').forEach(f => f.onsubmit = async ev => {
+  ev.preventDefault();
+  const body = {};
+  for (const [k, v] of new FormData(f)) body[k] = (k.endsWith('_id') || k === 'qty') ? +v : v;
+  const url = f.dataset.url; keys[url] ||= crypto.randomUUID();
+  $('#alert').style.display = 'none';
+  try { await api('POST', url, body, keys[url]); delete keys[url]; f.qty.value = ''; toast('Готово'); }
+  catch (e) {
+    if (e.http) delete keys[url];
+    if (e.error === 'insufficient_at_warehouse') showShortage(e, body);
+    else toast(errText(e), 'err');
+  }
+  load();
+});
+
+function showShortage(e, body) {
+  const el = $('#alert'); el.style.display = 'block';
+  el.innerHTML = `<b>${esc(e.message)}</b><div style="margin-top:6px">Можно привезти недостающее с другого ФФ: ` + e.others.map(o =>
+    `<button data-act="cover" data-from="${o.warehouse_id}" data-to="${body.warehouse_id}" data-p="${body.product_id}"
+      data-qty="${Math.min(o.available, e.missing)}">${Math.min(o.available, e.missing)} шт из «${esc(o.name)}»</button>`).join(' ') +
+    `</div><div class="mut" style="margin-top:6px">Либо выберите другой ФФ в форме. После приёмки перемещения повторите операцию.</div>`;
+}
+
+// кнопки действий
+document.addEventListener('click', async ev => {
+  const b = ev.target.closest('button[data-act]'); if (!b) return;
+  const id = b.dataset.id, act = b.dataset.act;
+  try {
+    if (act === 'tr-recv') await api('POST', `/api/transfers/${id}/receive`);
+    if (act === 'ship') await api('POST', `/api/fbs/${id}/ship`);
+    if (act === 'cancel') await api('POST', `/api/fbs/${id}/cancel`);
+    if (act === 'fbo-recv') await api('POST', `/api/fbo/${id}/receive`);
+    if (act === 'rename') await api('PATCH', `/api/warehouses/${id}`, {name: $('#rn-' + id).value});
+    if (act === 'del') {
+      if (!confirm('Удалить ФФ? Остатки и история сохранятся, склад останется виден как «удалён».')) return;
+      await api('DELETE', `/api/warehouses/${id}`);
+    }
+    if (act === 'cover') {
+      await api('POST', '/api/transfers', {product_id: +b.dataset.p, from_warehouse_id: +b.dataset.from,
+        to_warehouse_id: +b.dataset.to, qty: +b.dataset.qty}, crypto.randomUUID());
+      $('#alert').style.display = 'none';
+    }
+    toast('Готово');
+  } catch (e) { toast(errText(e), 'err'); }
+  load();
+});
+
+$('#f-wh').onsubmit = async ev => {
+  ev.preventDefault();
+  try { await api('POST', '/api/warehouses', {name: ev.target.name.value}); ev.target.reset(); toast('ФФ добавлен'); }
+  catch (e) { toast(errText(e), 'err'); }
+  load();
+};
+
+load();
+</script>
+</body>
+</html>

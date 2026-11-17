@@ -1,0 +1,57 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Launch CheckStock",
+			"type": "shell",
+			"command": "docker",
+			"args": [
+				"compose",
+				"--project-directory",
+				"C:\\Users\\Мира\\Downloads\\checkstock\\checkstock",
+				"up",
+				"--build"
+			],
+			"isBackground": true,
+			"problemMatcher": []
+		},
+		{
+			"label": "Check local runtime",
+			"type": "shell",
+			"command": "python",
+			"args": [
+				"-c",
+				"import importlib.util,socket; print('python ready'); print('modules', {m: importlib.util.find_spec(m) is not None for m in ['fastapi','uvicorn','sqlalchemy','psycopg']}); s=socket.socket(); s.settimeout(1); print('postgres_5432', s.connect_ex(('127.0.0.1',5432)==0)); s.close()"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Launch CheckStock local",
+			"type": "shell",
+			"command": "python",
+			"args": [
+				"-m",
+				"uvicorn",
+				"checkstock.app.main:app",
+				"--host",
+				"127.0.0.1",
+				"--port",
+				"8000"
+			],
+			"isBackground": true,
+			"problemMatcher": []
+		},
+		{
+			"label": "Check PostgreSQL service",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/c",
+				"sc.exe query state= all | findstr /I postgres"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		}
+	]
+}
